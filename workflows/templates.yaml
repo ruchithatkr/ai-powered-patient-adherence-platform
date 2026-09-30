@@ -1,0 +1,32 @@
+# Clinician-approved message templates. Only these may be sent.
+# NOTE: approval_record values below are SYNTHETIC DEMO records, not real clinical approvals.
+library_version: "2026.2"
+templates:
+  REMINDER_SIMPLE:
+    version: "1"
+    kb: null
+    high_touch: false
+    standing_approval: {granted: true, record: SYNTHETIC-DEMO-STANDING-APPROVAL}
+    locales:
+      en: {status: APPROVED, approval_record: SYNTHETIC-DEMO, body: "Hello {first_name}. This is a reminder about your {medication_label} at {time}. Reply HELP to reach your care team."}
+  EDUCATION_ROUTINE:
+    version: "1"
+    kb: KB-ADH-001
+    high_touch: false
+    standing_approval: {granted: true, record: SYNTHETIC-DEMO-STANDING-APPROVAL}
+    locales:
+      en: {status: APPROVED, approval_record: SYNTHETIC-DEMO, body: "Hello {first_name}. Here is a tip. {kb_text} Reply HELP to reach your care team."}
+  EDUCATION_REFILL:
+    version: "1"
+    kb: KB-REFILL-002
+    high_touch: false
+    standing_approval: {granted: true, record: SYNTHETIC-DEMO-STANDING-APPROVAL}
+    locales:
+      en: {status: APPROVED, approval_record: SYNTHETIC-DEMO, body: "Hello {first_name}. {kb_text} Reply HELP to reach your care team."}
+  SUPPORT_CALLBACK:
+    version: "1"
+    kb: null
+    high_touch: true
+    standing_approval: {granted: false, record: null}
+    locales:
+      en: {status: APPROVED, approval_record: SYNTHETIC-DEMO, body: "Hello {first_name}. Your care team would like to check in with you. Someone will contact you at a time that suits you."}

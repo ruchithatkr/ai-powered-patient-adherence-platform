@@ -1,0 +1,8 @@
+# Accountable owners (CLAUDE.md section 13). These are organisational decisions and CANNOT be assigned by the developer.
+product: UNASSIGNED
+clinical_safety: UNASSIGNED
+privacy: UNASSIGNED
+security: UNASSIGNED
+model_risk: UNASSIGNED
+data: UNASSIGNED
+operations: UNASSIGNED

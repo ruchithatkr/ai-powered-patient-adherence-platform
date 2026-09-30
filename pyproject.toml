@@ -1,3 +1,43 @@
+[project]
+name = "patient-adherence-platform"
+version = "1.1.0"
+requires-python = ">=3.12"
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q -p no:cacheprovider"
+filterwarnings = ["ignore::DeprecationWarning", "ignore::pytest.PytestUnraisableExceptionWarning"]
+
+[tool.ruff]
+line-length = 130
+target-version = "py312"
+extend-exclude = ["_parked_peer_session", ".venv", "var"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "ASYNC", "C4", "SIM"]
+ignore = ["S101", "B008", "E501", "SIM108", "S311"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "B", "SIM"]
+"hooks/*" = ["S404", "S603"]
+"agents/evaluation_agent.py" = ["S603"]  # fixed git/pytest invocations, no untrusted input
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+check_untyped_defs = true
+disallow_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+ignore_missing_imports = true
+exclude = ["tests/", ".venv/", "_parked_peer_session/", "var/"]
+
+[tool.bandit]
+exclude_dirs = ["tests", ".venv", "_parked_peer_session", "var"]
+
+[tool.coverage.run]
+source = ["agents", "app", "domain", "guardrails", "mcp", "memory", "observability", "skills", "workflows", "evals"]
+omit = ["app/ui.py"]

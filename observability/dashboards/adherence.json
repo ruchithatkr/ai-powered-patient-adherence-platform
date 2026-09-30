@@ -1,0 +1,9 @@
+{"title":"Adherence platform","panels":[
+{"title":"Workflows by status","expr":"sum by (status) (adherence_workflows_total)"},
+{"title":"Tool error rate","expr":"1 - sum(adherence_tool_calls_total{status=\"ok\"}) / sum(adherence_tool_calls_total)"},
+{"title":"Tool latency p95 (ms)","expr":"histogram_quantile(0.95, sum by (le) (rate(adherence_tool_latency_ms_bucket[5m])))"},
+{"title":"Guardrail blocks","expr":"sum(adherence_guardrail_decisions_total{decision=\"BLOCK\"})"},
+{"title":"Abstain rate","expr":"sum(adherence_risk_band_total{band=\"ABSTAIN\"}) / sum(adherence_risk_band_total)"},
+{"title":"Human override rate","expr":"sum(adherence_approvals_total{decision=\"REJECT\",kind=\"human\"}) / sum(adherence_approvals_total{kind=\"human\"})"},
+{"title":"Trace gaps","expr":"adherence_trace_gaps"},
+{"title":"HTTP requests","expr":"sum by (route,status) (adherence_http_requests_total)"}]}

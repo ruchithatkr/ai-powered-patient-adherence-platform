@@ -1,0 +1,11 @@
+# Synthetic stand-in for an approved medication-education source.
+KB-ADH-001:
+  version: "2026.1"
+  title: Building a routine for taking medicines
+  text: Link your medicine to a daily habit, like brushing your teeth. This can help you remember.
+  source: Synthetic Patient Education Library v2026.1
+KB-REFILL-002:
+  version: "2026.1"
+  title: Refilling on time
+  text: Ask your pharmacy about refill reminders. This helps make sure you do not run out.
+  source: Synthetic Patient Education Library v2026.1

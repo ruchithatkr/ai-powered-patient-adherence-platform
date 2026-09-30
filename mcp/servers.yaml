@@ -1,11 +1,95 @@
 # Approved logical MCP servers (allowlist). Anything not listed is denied.
-# writes: true => requires an explicit human-approval token (except care-team-review/audit-write, which only create review/audit records).
+# Changing this file adds/changes tool permissions and needs recorded human approval.
 purposes: [adherence_support, safety_review]
+allowed_destinations: [local-synthetic]
 servers:
-  patient-records-read:  {ops: {get_context: {write: false, required: [patient_ref]}}, roles: [care_coordinator, pharmacist, nurse, clinician]}
-  consent-registry-read: {ops: {get_consent: {write: false, required: [patient_ref]}}, roles: [care_coordinator, pharmacist, nurse, clinician, privacy_officer]}
-  knowledge-base-read:   {ops: {get_article: {write: false, required: [kb_id]}}, roles: [care_coordinator, pharmacist, nurse, clinician]}
-  risk-model-infer:      {ops: {infer: {write: false, required: [features]}}, roles: [care_coordinator, pharmacist, nurse, clinician]}
-  care-team-review:      {ops: {create_task: {write: true, approval: false, required: [patient_ref, packet]}, get_task: {write: false, required: [task_id]}}, roles: [care_coordinator, pharmacist, nurse, clinician]}
-  notification-send:     {ops: {send: {write: true, approval: true, required: [idempotency_key, channel, template_id, body, patient_ref]}}, roles: [care_coordinator]}
-  audit-write:           {ops: {append: {write: true, approval: false, required: []}}, roles: [care_coordinator, pharmacist, nurse, clinician, privacy_officer]}
+  patient-records-read:
+    destination: local-synthetic
+    roles: [care_coordinator, pharmacist, nurse, clinician]
+    consent_required: true
+    ops:
+      get_context:
+        write: false
+        params: {type: object, required: [patient_ref], additionalProperties: false,
+                 properties: {patient_ref: {type: string, pattern: '^P-[0-9]{3,}$'}}}
+        response: {type: object, required: [patient_ref, first_name, plan, prefs, events, prior_interventions, provenance],
+                   properties: {patient_ref: {type: string}, first_name: {type: string, maxLength: 40},
+                                plan: {type: object, required: [version, medication_label, verified_at, schedule_times_local]},
+                                prefs: {type: object}, events: {type: array}, prior_interventions: {type: array},
+                                provenance: {type: array, items: {type: string}}}}
+  consent-registry-read:
+    destination: local-synthetic
+    roles: [care_coordinator, pharmacist, nurse, clinician, privacy_officer]
+    consent_required: false
+    ops:
+      get_consent:
+        write: false
+        params: {type: object, required: [patient_ref], additionalProperties: false,
+                 properties: {patient_ref: {type: string, pattern: '^P-[0-9]{3,}$'}}}
+        response: {type: [object, "null"], required: [patient_ref, purposes, channels, expires_at, withdrawn]}
+  knowledge-base-read:
+    destination: local-synthetic
+    roles: [care_coordinator, pharmacist, nurse, clinician]
+    consent_required: false
+    ops:
+      get_article:
+        write: false
+        params: {type: object, required: [kb_id], additionalProperties: false,
+                 properties: {kb_id: {type: string, pattern: '^KB-[A-Z]+-[0-9]{3}$'}}}
+        response: {type: object, required: [kb_id, version, title, text, source]}
+  risk-model-infer:
+    destination: local-synthetic
+    roles: [care_coordinator, pharmacist, nurse, clinician]
+    consent_required: false
+    ops:
+      infer:
+        write: false
+        params: {type: object, required: [features], additionalProperties: false,
+                 properties: {features: {type: object, required: [n_obs, adherence_ratio, late_refill_days],
+                                         properties: {n_obs: {type: integer, minimum: 0},
+                                                      adherence_ratio: {type: number, minimum: 0, maximum: 1},
+                                                      late_refill_days: {type: integer, minimum: 0}},
+                                         additionalProperties: false}}}
+        response: {type: object, required: [score, model, model_version],
+                   properties: {score: {type: number, minimum: 0, maximum: 1}}}
+  care-team-review:
+    destination: local-synthetic
+    roles: [care_coordinator, pharmacist, nurse, clinician]
+    consent_required: false
+    ops:
+      create_task:
+        write: true
+        approval: false
+        params: {type: object, required: [patient_ref, packet], additionalProperties: false,
+                 properties: {patient_ref: {type: string, pattern: '^P-[0-9]{3,}$'}, packet: {type: object}}}
+        response: {type: object, required: [task_id]}
+      get_task:
+        write: false
+        params: {type: object, required: [task_id], additionalProperties: false,
+                 properties: {task_id: {type: string, pattern: '^RT-[0-9a-f]{8}$'}}}
+        response: {type: object, required: [task_id, patient_ref, status]}
+  notification-send:
+    destination: local-synthetic
+    roles: [care_coordinator]
+    consent_required: true
+    ops:
+      send:
+        write: true
+        approval: true
+        params: {type: object, required: [idempotency_key, channel, template_id, body, patient_ref], additionalProperties: false,
+                 properties: {idempotency_key: {type: string, minLength: 8, maxLength: 64},
+                              channel: {enum: [sms, email]}, template_id: {type: string},
+                              body: {type: string, minLength: 1, maxLength: 1000},
+                              patient_ref: {type: string, pattern: '^P-[0-9]{3,}$'}}}
+        response: {type: object, required: [receipt_id, delivery_status, simulated, duplicate]}
+  audit-write:
+    destination: local-synthetic
+    roles: [care_coordinator, pharmacist, nurse, clinician, privacy_officer]
+    consent_required: false
+    ops:
+      append:
+        write: true
+        approval: false
+        params: {type: object, required: [trace_id, node], additionalProperties: false,
+                 properties: {trace_id: {type: string}, node: {type: string}, status: {type: string}}}
+        response: {type: object, required: [event_id]}

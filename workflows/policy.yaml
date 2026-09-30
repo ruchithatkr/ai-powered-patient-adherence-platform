@@ -1,0 +1,33 @@
+# Operational policy. Versioned; changes need recorded human approval (see governance/).
+# Values marked PLACEHOLDER are NOT clinically or statistically validated.
+policy_version: POLICY-1.1
+workflow_version: wf-1.1
+freshness:
+  medication_plan_max_age_days: 30
+risk:
+  status: PLACEHOLDER_UNAPPROVED
+  min_observations: 5
+  expected_observations: 14
+  min_confidence: 0.6
+  band_cutoffs: {medium: 0.25, high: 0.5}
+intervention:
+  frequency_cap: {max_messages: 3, window_days: 7}
+  plan_expiry_hours: 24
+  blocking_outcomes: [opt_out, complaint]
+accessibility:
+  status: PLACEHOLDER_UNAPPROVED
+  max_reading_grade: 8.0
+  max_sms_chars: 320
+operations:
+  workflow_ttl_hours: 72   # longer than plan expiry so expired plans can still be closed and explained
+  memory_retention_days: 365
+  tool_timeout_seconds: 2.0
+  notification_rate_limit_per_minute: 20
+alerts:
+  repeated_tool_failures: {threshold: 3, window_minutes: 15}
+  anomalous_access: {distinct_patients: 5, window_minutes: 10}
+  drift_psi: 0.2
+emergency_guidance: >-
+  If you think you are having a medical emergency, call your local emergency number now.
+  For side effects or other concerns, please contact your pharmacist or care team.
+  This service cannot give medical advice.

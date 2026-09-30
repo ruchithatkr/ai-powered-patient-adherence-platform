@@ -11,12 +11,13 @@ guidance and routes to trained staff. Low-confidence assessments ABSTAIN and go 
 
 ## Setup and run (Python 3.12+; developed on 3.14)
 ```
-python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt
+python3 -m venv .venv && . .venv/bin/activate && pip install --require-hashes -r requirements.lock && pip install -r requirements-dev.in
 ./run.sh          # UI http://localhost:8501 · API docs http://localhost:8000/docs
-pytest -q                 # tests
-python evals/run_evals.py # scenario/safety evaluation -> evals/results/0.1.0.md
+make check                # ruff + mypy + pytest(+coverage) + bandit + evals + change-control
+pytest                    # tests only
+python -m evals.run_evals # evaluation-agent -> evals/results/0.2.0.{md,json} (signed if ADHERENCE_EVAL_SIGNING_KEY set)
 ```
-Environment variables: `API_URL` (UI -> API, default http://127.0.0.1:8000). No secrets are needed. `ALLOW_REAL_PHI` must be unset.
+Environment variables (prefix `ADHERENCE_`, see `app/settings.py`): `AUDIT_PATH` (default var/audit.jsonl), `DRIFT_BASELINE_PATH`, `OTEL_CONSOLE`, `LOG_LEVEL`, `EVAL_SIGNING_KEY`; UI uses `API_URL`. No secrets needed; `ADHERENCE_ALLOW_REAL_PHI` is refused.
 
 ## Synthetic demo (UI, tab 1 then tab 2)
 | Patient | Expected outcome |
@@ -50,7 +51,7 @@ Consent/purpose/channel checks, quiet hours in the patient's timezone, frequency
 PHI/secret/injection screening, PHI-safe hashed audit events, hash-chain tamper detection, deletion and consent withdrawal, RBAC on gateway.
 
 ## Evaluation
-Methodology and latest executed results: [evals/results/0.1.0.md](evals/results/0.1.0.md). Thresholds: [evals/thresholds.yaml](evals/thresholds.yaml).
+Methodology and latest executed results: [evals/results/0.2.0.md](evals/results/0.2.0.md). Thresholds: [evals/thresholds.yaml](evals/thresholds.yaml).
 Risk-model accuracy, calibration and fairness: **NOT YET MEASURED**.
 
 ## Limitations / unresolved risks (be honest before any real use)
@@ -61,3 +62,13 @@ no accessibility audit, no governance owners assigned, no signed release record.
 ## Rollback and change approval
 Stop `run.sh` processes; redeploy the previous tagged version (no git repo exists yet - initialise one and tag releases). Any change to
 templates, thresholds, MCP permissions or models needs human approval recorded with the change.
+
+
+## Update 1.1 - what changed
+- Config as data (`workflows/policy.yaml`, `templates.yaml`, `guardrails/patterns.yaml`, `mcp/servers.yaml`); app factory + dependency injection; async supervisor driving a stage state machine.
+- Durable hash-chained audit (`var/audit.jsonl`, refuses to start if tampered), OTel-backed span/parent ids, `/metrics`, `/alerts`, `/ops/summary`, dashboard tab, Grafana JSON.
+- MCP gateway: JSON-Schema contracts, consent gating, approval tokens bound to one send, timeouts, untrusted-content screening; contract tests for every operation.
+- All Claude Code hooks from CLAUDE.md section 9 in `hooks/` (`.claude/settings.json`); CI in `.github/workflows/ci.yml` (never executed here); hash-locked deps (`requirements.lock`); `make check`.
+- Change control: `scripts/check_change_approvals.py` + `governance/change-approvals.yaml` (baseline entries are developer-recorded, NOT clinical approvals).
+- Governance drafts: `docs/dpia.md`, `docs/data-inventory.md`, `docs/risk-register.md`, `governance/` (owners UNASSIGNED, release record unsigned).
+- Deliberately NOT done: authentication/SSO/MFA (header placeholder) and a real database (workflow state/memory still in-memory; only the audit log is durable). See the risk register.

@@ -1,47 +1,77 @@
 """Deterministic guardrails. They fail closed and never depend on an LLM."""
+
 import re
 from datetime import datetime, timedelta
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
-from domain.models import Consent, GuardrailResult, InterventionPlan, Preferences, PriorIntervention
+import yaml
 
-INJECTION = [r"ignore (all |any )?(previous|prior|above) (instructions|rules)", r"disregard .{0,30}(policy|rules|instructions)",
-             r"you are now", r"system prompt", r"reveal .{0,20}(prompt|secret|key)", r"override (the )?(guardrail|policy|approval)",
-             r"skip (the )?approval"]
-SECRETS = [r"sk-[A-Za-z0-9]{16,}", r"AKIA[0-9A-Z]{16}", r"(?i)bearer\s+[a-z0-9\-_.]{20,}", r"(?i)password\s*[:=]"]
-PHI = [r"\b\d{3}-\d{2}-\d{4}\b", r"[\w.+-]+@[\w-]+\.[\w.]+", r"\b\+?\d[\d\s().-]{8,}\d\b"]
-EMERGENCY = [r"chest pain", r"can'?t breathe|cannot breathe|difficulty breathing", r"overdose", r"suicid", r"unconscious",
-             r"allergic reaction|anaphyla", r"swelling of (the )?(face|throat)", r"severe (bleeding|pain)", r"side effect", r"adverse"]
-UNSAFE_CONTENT = [r"\b(increase|decrease|double|halve|reduce|skip|stop|discontinue)\b.{0,20}\b(dose|dosage|medicine|medication|pill)",
-                  r"\byou (have|likely have|probably have)\b", r"\bdiagnos", r"\bprescrib", r"\b(guarantee|cure[sd]?)\b",
-                  r"\b(buy|discount|limited offer|promo)\b", r"\b(you must|or else|irresponsible|ashamed|lazy)\b"]
+from domain.models import Consent, GuardrailResult, Preferences, PriorIntervention
+from guardrails.normalize import base, variants
+
+PATTERNS_PATH = Path(__file__).with_name("patterns.yaml")
+LANGUAGE_CATEGORIES = {"injection", "emergency", "unsafe_content"}
 
 
-def _any(patterns, text):
-    return [p for p in patterns if re.search(p, text or "", re.I)]
+@lru_cache(maxsize=1)
+def _load() -> tuple[str, dict[str, list[re.Pattern[str]]]]:
+    raw: dict[str, Any] = yaml.safe_load(PATTERNS_PATH.read_text())
+    version = str(raw.pop("version"))
+    return version, {k: [re.compile(p, re.I) for p in v] for k, v in raw.items()}
+
+
+def patterns_version() -> str:
+    return _load()[0]
+
+
+def _hit(category: str, text: str | None) -> bool:
+    pats = _load()[1][category]
+    candidates = variants(text or "") if category in LANGUAGE_CATEGORIES else [base(text or "")]
+    return any(p.search(c) for p in pats for c in candidates)
 
 
 def check_input(text: str) -> list[GuardrailResult]:
-    out = []
-    if _any(INJECTION, text):
+    out: list[GuardrailResult] = []
+    if _hit("injection", text):
         out.append(GuardrailResult(guardrail="prompt-injection", decision="BLOCK", detail="injection pattern"))
-    if _any(SECRETS, text):
+    if _hit("secrets", text):
         out.append(GuardrailResult(guardrail="secret-detect", decision="BLOCK", detail="secret-like string"))
-    if _any(PHI, text):
+    if _hit("phi", text):
         out.append(GuardrailResult(guardrail="phi-detect", decision="BLOCK", detail="direct identifier in free text"))
-    if _any(EMERGENCY, text):
-        out.append(GuardrailResult(guardrail="emergency-language", decision="REVIEW",
-                                   detail="potential emergency/adverse-event language -> trained staff"))
+    if _hit("emergency", text):
+        out.append(
+            GuardrailResult(
+                guardrail="emergency-language",
+                decision="REVIEW",
+                detail="potential emergency/adverse-event language -> trained staff",
+            )
+        )
     return out or [GuardrailResult(guardrail="input", decision="PASS")]
 
 
 def is_emergency(text: str) -> bool:
-    return bool(_any(EMERGENCY, text))
+    return _hit("emergency", text)
 
 
-def check_content(body: str, allowed_body_prefix_check: bool = True) -> GuardrailResult:
-    hits = _any(UNSAFE_CONTENT, body)
-    if hits:
+def contains_injection(text: str) -> bool:
+    """Used on tool output, which is untrusted DATA and must never carry instructions."""
+    return _hit("injection", text)
+
+
+def contains_sensitive(text: str) -> str | None:
+    """Return 'secret' / 'phi' if a string looks like one, so loggers can redact it."""
+    if _hit("secrets", text):
+        return "secret"
+    if _hit("phi", text):
+        return "phi"
+    return None
+
+
+def check_content(body: str) -> GuardrailResult:
+    if _hit("unsafe_content", body):
         return GuardrailResult(guardrail="content-safety", decision="BLOCK", detail="unsafe wording detected")
     return GuardrailResult(guardrail="content-safety", decision="PASS")
 
@@ -65,15 +95,15 @@ def frequency_ok(prior: list[PriorIntervention], now_utc: datetime, cap: int = 3
     return sum(1 for p in prior if now_utc - p.sent_at <= timedelta(days=days)) < cap
 
 
-def consent_decision(consent: Consent | None, purpose: str, channel: str | None, now_utc: datetime):
-    """Returns (Decision, policy_id, reason). Never modifies consent."""
+def consent_decision(consent: Consent | None, purpose: str, channel: str | None, now_utc: datetime) -> tuple[str, str, str]:
+    """Returns (ALLOW|DENY|REVIEW, policy_id, reason). Never modifies consent."""
     if consent is None:
         return "DENY", "CONSENT-POL-1", "no consent record"
     if consent.withdrawn:
         return "DENY", consent.policy_id, "consent withdrawn"
     if consent.expires_at < now_utc:
         return "DENY", consent.policy_id, "consent expired"
-    if purpose not in consent.purposes:
+    if purpose not in consent.purposes and purpose != "safety_review":
         return "DENY", consent.policy_id, "purpose not in consent scope"
     if channel and channel not in consent.channels:
         return "REVIEW", consent.policy_id, "channel not consented"

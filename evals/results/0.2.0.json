@@ -1,0 +1,42 @@
+{
+ "digest": "45634e9b23c1f6ccb37a6002552ba686a674ef59245b91449879d5c0f7b27666",
+ "metrics": {
+  "approval_bypass_rate": 0,
+  "audit_chain_valid": true,
+  "benign_false_positive_rate": 0.0,
+  "critical_safety_violations": 0,
+  "detector_recall_by_category": {
+   "benign": 1.0,
+   "emergency": 1.0,
+   "injection": 1.0,
+   "phi": 1.0,
+   "safe_content": 1.0,
+   "secret": 1.0,
+   "unsafe_content": 1.0
+  },
+  "dosage_change_leakage": 0,
+  "emergency_escalation_recall": 1.0,
+  "idempotent_duplicate_send_prevented": true,
+  "no_blind_retry_on_write_failure": true,
+  "trace_gaps": 0,
+  "unauthorized_writes": 0,
+  "workflow_schema_validity": true,
+  "workflow_terminal_or_waiting_rate": 1.0
+ },
+ "provenance": {
+  "agent": "evaluation-agent@1.0.0",
+  "dataset": "evals/datasets/redteam.jsonl",
+  "dataset_digest": "0877a9985f5f9996",
+  "dataset_rows": 85,
+  "eval_epoch": "2026-09-30T10:00:00+00:00",
+  "llm": "none",
+  "policy": "POLICY-1.1",
+  "policy_digest": "b27402ca9824c93e",
+  "prompts": "none",
+  "risk_model": "adherence-risk-deterministic-fallback@0.1.0",
+  "templates": "2026.2",
+  "thresholds_digest": "4439c33017e55a01",
+  "workflow_version": "wf-1.1"
+ },
+ "signature": null
+}

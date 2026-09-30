@@ -1,0 +1,13 @@
+-c requirements.lock
+-r requirements.in
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-cov==7.1.0
+hypothesis==6.168.3
+ruff==0.16.9
+mypy==2.3.1
+types-PyYAML==6.0.12.20260906
+bandit==1.9.4
+pip-audit==2.10.1
+cyclonedx-bom==7.5.0
+pip-tools==7.6.1

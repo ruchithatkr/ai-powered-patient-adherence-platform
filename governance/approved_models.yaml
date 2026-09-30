@@ -1,0 +1,5 @@
+# Approved model list (verified at SessionStart). Adding a model or a new release needs recorded human approval.
+risk_models:
+  - adherence-risk-deterministic-fallback@0.1.0   # deterministic; calibration NOT YET MEASURED
+llm_gateway:
+  approved: []   # no LLM is called in this build

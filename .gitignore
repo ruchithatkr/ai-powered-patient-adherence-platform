@@ -10,3 +10,4 @@ var/
 .~lock.*
 .env
 sbom.json
+_parked_peer_session/

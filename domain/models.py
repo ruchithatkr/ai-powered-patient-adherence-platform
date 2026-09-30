@@ -1,37 +1,38 @@
 """Typed domain models. All data is synthetic in local development."""
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from enum import Enum
-from typing import Literal, Optional
+from datetime import UTC, datetime
+from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
 
 def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
-class RiskBand(str, Enum):
+class RiskBand(StrEnum):
     LOW = "LOW"
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
     ABSTAIN = "ABSTAIN"  # low confidence -> human review
 
 
-class Decision(str, Enum):
+class Decision(StrEnum):
     ALLOW = "ALLOW"
     DENY = "DENY"
     REVIEW = "REVIEW"
 
 
-class Status(str, Enum):
+class Status(StrEnum):
     RUNNING = "RUNNING"
     AWAITING_APPROVAL = "AWAITING_APPROVAL"
-    ESCALATED = "ESCALATED"      # routed to trained staff
-    STOPPED = "STOPPED"          # fail-closed stop condition
+    ESCALATED = "ESCALATED"  # routed to trained staff
+    STOPPED = "STOPPED"  # fail-closed stop condition
     COMPLETED = "COMPLETED"
-    REJECTED = "REJECTED"        # human rejected
+    REJECTED = "REJECTED"  # human rejected
 
 
 class Consent(BaseModel):
@@ -45,7 +46,7 @@ class Consent(BaseModel):
 
 class MedicationPlan(BaseModel):
     version: str
-    medication_label: str          # display label only; no dosing logic is derived from it
+    medication_label: str  # display label only; no dosing logic is derived from it
     verified_at: datetime
     schedule_times_local: list[str]
     source: str = "synthetic-patient-records"
@@ -76,6 +77,7 @@ class PriorIntervention(BaseModel):
 
 class PatientContext(BaseModel):
     patient_ref: str
+    first_name: str = ""  # approved template field only; never logged
     plan: MedicationPlan
     prefs: Preferences
     events: list[AdherenceEvent]
@@ -85,7 +87,7 @@ class PatientContext(BaseModel):
 
 class Factor(BaseModel):
     name: str
-    detail: str            # plain language, no causal claims
+    detail: str  # plain language, no causal claims
     evidence_id: str
 
 
@@ -109,8 +111,8 @@ class InterventionPlan(BaseModel):
     template_id: str
     template_version: str
     channel: str
-    body: str                                # rendered from approved template only
-    citation: Optional[str] = None
+    body: str  # rendered from approved template only
+    citation: str | None = None
     requires_approval: bool
     approval_reasons: list[str]
     rationale: str
@@ -118,8 +120,10 @@ class InterventionPlan(BaseModel):
     expires_at: datetime
     evidence_refs: list[str]
     routes_to_human: bool = False
-    send_not_before: Optional[datetime] = None
+    send_not_before: datetime | None = None
     accessibility: list[str] = []
+    language: str = "en"
+    template_fields: dict[str, str] = {}
 
 
 class Approval(BaseModel):
@@ -136,7 +140,7 @@ class ActionReceipt(BaseModel):
     receipt_id: str
     tool: str
     idempotency_key: str
-    delivery_status: str        # delivery only; never implies engagement or intake
+    delivery_status: str  # delivery only; never implies engagement or intake
     simulated: bool = True
     at: datetime = Field(default_factory=utcnow)
 
@@ -155,19 +159,22 @@ class WorkflowState(BaseModel):
     purpose: str
     requester: str
     requester_role: str
-    consent_snapshot: Optional[Consent] = None
-    medication_plan_version: Optional[str] = None
+    consent_snapshot: Consent | None = None
+    medication_plan_version: str | None = None
     evidence_refs: list[str] = []
-    risk_assessment: Optional[RiskAssessment] = None
-    intervention_plan: Optional[InterventionPlan] = None
+    risk_assessment: RiskAssessment | None = None
+    intervention_plan: InterventionPlan | None = None
     guardrail_results: list[GuardrailResult] = []
-    approval: Optional[Approval] = None
-    action_receipt: Optional[ActionReceipt] = None
-    review_task_id: Optional[str] = None
+    approval: Approval | None = None
+    action_receipt: ActionReceipt | None = None
+    review_task_id: str | None = None
     status: Status = Status.RUNNING
     stage: str = "intake"
-    stop_reason: Optional[str] = None
+    stop_reason: str | None = None
+    stages_completed: list[str] = []
     rationale: str = ""
-    version: int = 0            # optimistic locking
+    version: int = 0  # optimistic locking
+    stages_visited: list[str] = []
+    root_span_id: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
-    expires_at: Optional[datetime] = None
+    expires_at: datetime | None = None

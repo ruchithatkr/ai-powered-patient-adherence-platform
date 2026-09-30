@@ -43,3 +43,11 @@ Calibration, subgroup performance and validity: NOT YET MEASURED.
 - **Model failure**: stop; deterministic fallback is the model; escalate to model-risk owner.
 - **Adverse-event/emergency language**: approved safety guidance shown; review task created for trained staff; no autonomous emergency call.
 - **Incident**: preserve audit trace (`GET /workflows/{id}/trace`), notify accountable owners, roll back (below).
+
+
+# Update 1.1 (refactor)
+- Composition root `app/container.py`; FastAPI factory `create_app(runtime)`; async supervisor engine (`agents/supervisor.py`) driving stage handlers (`workflows/stages.py`).
+- Config as data: `workflows/policy.yaml`, `workflows/templates.yaml` (locale-aware, DRAFT locales unusable), `guardrails/patterns.yaml`, `mcp/servers.yaml` (JSON-Schema contracts).
+- MCP gateway: schema-validated params/responses, destination allowlist, consent gating, approval tokens bound to one idempotency key + expiry, real timeouts, untrusted-content screening.
+- Observability: OTel span ids -> audit `span_id/parent_span_id`; durable hash-chained JSONL; metrics (`/metrics`), alerts (`/alerts`), drift (needs approved baseline), dashboard tab + `observability/dashboards/adherence.json`.
+- Not implemented (by request): authentication (header placeholder) and a real database.

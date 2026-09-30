@@ -1,242 +1,282 @@
-"""adherence-supervisor: owns workflow state; deterministic routing for permissions, consent, emergency, approval gates."""
-import uuid
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+"""adherence-supervisor: owns workflow state and the state-machine engine.
 
-from agents.subagents import (AdherenceRiskAgent, ConsentAccessAgent, ContentSafetyAgent, Ctx, DeliveryAgent,
-                              HumanReviewAgent, InterventionPlannerAgent, PatientContextAgent)
-from domain.models import GuardrailResult, Status, WorkflowState
-from domain.synthetic import EMERGENCY_GUIDANCE
-from guardrails.checks import check_input, is_emergency
-from mcp.gateway import Backend, Gateway, GatewayError
-from memory.store import LongTermMemory, WorkflowStore
-from observability.audit import AuditStore
-from skills.assess_adherence_risk import SkillError
-from skills.design_safe_intervention import NoIntervention
-from workflows.definition import (APPROVER_ROLES, POLICY_VERSION, REQUESTER_ROLES, STALE_DAYS, WORKFLOW_VERSION)
+Deterministic rules decide permissions, consent, emergency signals and approval gates. Stage logic lives in
+workflows/stages.py; this module drives transitions, persistence, tracing and patient-rights operations.
+"""
+
+import asyncio
+import uuid
+from typing import Any, Literal
+
+from domain.errors import WorkflowStop
+from domain.models import Status, WorkflowState
+from mcp.gateway import CallIdentity, GatewayError
+from memory.store import ConflictError
+from observability.audit import h
+from workflows.definition import (
+    APPROVER_ROLES,
+    DENIED_STOP_REASONS,
+    NEXT,
+    Continue,
+    Finish,
+    Outcome,
+    Scratch,
+    Stop,
+    Wait,
+    require,
+)
+from workflows.runtime import Runtime
+from workflows.stages import HANDLERS
+
+AGENT_VERSION = "1.1.0"
 
 
 class Supervisor:
     name = "adherence-supervisor"
 
-    def __init__(self, audit: AuditStore | None = None, backend: Backend | None = None,
-                 store: WorkflowStore | None = None, memory: LongTermMemory | None = None):
-        self.audit = audit or AuditStore()
-        self.backend = backend or Backend()
-        self.gw = Gateway(self.audit, self.backend)
-        self.store = store or WorkflowStore()
-        self.memory = memory or LongTermMemory()
-        self.consent_agent, self.context_agent = ConsentAccessAgent(), PatientContextAgent()
-        self.risk_agent, self.planner = AdherenceRiskAgent(), InterventionPlannerAgent()
-        self.safety, self.reviewer, self.delivery = ContentSafetyAgent(), HumanReviewAgent(), DeliveryAgent()
-
-    # ---- helpers -------------------------------------------------------------
-    def _ev(self, st, node, status="OK", **kw):
-        return self.audit.append(trace_id=st.trace_id, actor=self.name, node=node, status=status,
-                                 request_id=st.request_id, workflow_version=WORKFLOW_VERSION,
-                                 policy_version=POLICY_VERSION, agent=self.name, **kw)
-
-    def _stop(self, st: WorkflowState, reason: str, status=Status.STOPPED, rationale: str = ""):
-        st.status, st.stop_reason, st.rationale = status, reason, rationale or f"Workflow stopped: {reason}."
-        self._ev(st, "stop", status="STOPPED", error_code=reason)
-        return self._finish(st)
-
-    def _finish(self, st: WorkflowState):
-        st.stage = "close"
-        self._ev(st, "final", status=st.status.value, output={"status": st.status.value, "stop": st.stop_reason})
-        return self.store.put(st)
-
-    def _ctx(self, st, role=None, actor=None):
-        return Ctx(self.gw, actor or st.requester, role or st.requester_role, st.purpose, st.trace_id)
+    def __init__(self, rt: Runtime) -> None:
+        self.rt = rt
 
     # ---- entry point ----------------------------------------------------------
-    def start(self, *, patient_ref: str, purpose: str, requester: str, requester_role: str,
-              identity_patient_ref: str, patient_message: str = "") -> WorkflowState:
-        st = WorkflowState(trace_id="tr-" + uuid.uuid4().hex[:12], request_id="rq-" + uuid.uuid4().hex[:8],
-                           patient_ref=patient_ref, purpose=purpose, requester=requester, requester_role=requester_role)
-        self._ev(st, "request", input={"patient_ref": patient_ref, "purpose": purpose, "role": requester_role})
-        self._ev(st, "agent_plan", output=["consent-access", "patient-context", "adherence-risk", "intervention-planner",
-                                           "content-safety", "human-review", "delivery"])
-        c = self._ctx(st)
+    async def start(
+        self,
+        *,
+        patient_ref: str,
+        purpose: str,
+        requester: str,
+        requester_role: str,
+        identity_patient_ref: str,
+        patient_message: str = "",
+        request_id: str | None = None,
+    ) -> WorkflowState:
+        rt = self.rt
+        if request_id and (existing := rt.store.get_by_request(request_id)):
+            return existing  # duplicate submission: idempotent
+        st = WorkflowState(
+            trace_id="tr-" + uuid.uuid4().hex[:12], request_id=request_id or "rq-" + uuid.uuid4().hex[:8],
+            patient_ref=patient_ref, purpose=purpose, requester=requester, requester_role=requester_role,
+        )  # fmt: skip
+        ident = CallIdentity(requester, requester_role, purpose, st.trace_id)
+        scratch = Scratch(identity_patient_ref=identity_patient_ref, patient_message=patient_message)
+        with rt.tracer.bind(
+            request_id=st.request_id, workflow_version=rt.policy.workflow_version, policy_version=rt.policy.policy_version
+        ):
+            async with rt.tracer.span(
+                trace_id=st.trace_id, node="request", actor=requester, subject_hash=h(patient_ref),
+                purpose=purpose, role=requester_role, input={"patient_ref": patient_ref, "purpose": purpose, "role": requester_role},
+            ) as root:  # fmt: skip
+                st.root_span_id = root.span_id
+                rt.tracer.event(
+                    trace_id=st.trace_id, node="agent_plan", actor=self.name, agent=self.name, agent_version=AGENT_VERSION,
+                    output=["consent-access", "patient-context", "adherence-risk", "intervention-planner", "content-safety", "human-review", "delivery"],
+                )  # fmt: skip
+                await self._drive(st, ident, scratch, "intake", expected_version=None)
+        return st
 
-        # -- intake: input guardrails (deterministic) --
-        if requester_role not in REQUESTER_ROLES:
-            return self._stop(st, "ROLE_NOT_AUTHORIZED")
-        gr = check_input(patient_message)
-        st.guardrail_results += gr
-        if any(g.decision == "BLOCK" for g in gr):
-            return self._stop(st, "INPUT_BLOCKED", rationale="Input was blocked by safety guardrails (possible injection, secret or direct identifier).")
-        if identity_patient_ref != patient_ref:
-            return self._stop(st, "IDENTITY_MISMATCH")
-        if is_emergency(patient_message):
-            # Show approved safety guidance and route immediately to trained staff. No autonomous emergency escalation.
-            try:
-                st.review_task_id = self.reviewer.packet(c, patient_ref, "emergency/adverse-event language", None, None)
-            except GatewayError as e:
-                return self._stop(st, e.code)
-            return self._stop(st, "SAFETY_ESCALATION", status=Status.ESCALATED, rationale=EMERGENCY_GUIDANCE)
-
-        # -- authorize --
-        st.stage = "authorize"
-        try:
-            decision, policy, reason, consent = self.consent_agent.run(c, patient_ref)
-        except GatewayError as e:
-            return self._stop(st, e.code)
-        self._ev(st, "stage:authorize", output={"decision": decision, "policy": policy}, consent_policy=policy)
-        st.consent_snapshot = consent
-        if decision != "ALLOW":
-            return self._stop(st, f"CONSENT_{decision}", rationale=f"No action taken: {reason}.")
-
-        # -- retrieve (independent lookups in parallel) --
-        st.stage = "retrieve"
-        try:
-            with ThreadPoolExecutor(max_workers=2) as ex:
-                f_ctx = ex.submit(self.context_agent.run, c, patient_ref)
-                f_con = ex.submit(self.consent_agent.run, c, patient_ref, None)
-                ctx, _ = f_ctx.result(), f_con.result()
-        except GatewayError as e:
-            return self._stop(st, e.code)
-        if datetime.now(timezone.utc) - ctx.plan.verified_at > timedelta(days=STALE_DAYS):
-            return self._stop(st, "STALE_MEDICATION_DATA", rationale="Medication data is stale; no action taken. Refresh with the care team.")
-        st.medication_plan_version = ctx.plan.version
-        st.evidence_refs = [f"prov:{p}" for p in ctx.provenance]
-        self._ev(st, "stage:retrieve", output={"plan_version": ctx.plan.version}, evidence_ids=st.evidence_refs)
-
-        # -- assess --
-        st.stage = "assess"
-        try:
-            risk = self.risk_agent.run(c, ctx)
-        except SkillError as e:
-            return self._stop(st, str(e))
-        except GatewayError as e:
-            return self._stop(st, e.code)
-        st.risk_assessment = risk
-        self._ev(st, "stage:assess", skill="assess-adherence-risk", model=risk.model, model_version=risk.model_version,
-                 output={"band": risk.band.value}, evidence_ids=risk.evidence_refs, guardrail_decision="PASS")
-
-        # -- plan --
-        st.stage = "plan"
-        try:
-            plan = self.planner.run(c, ctx, risk, consent)
-        except NoIntervention as e:
-            st.rationale = str(e)
-            needs_human = risk.band.value == "ABSTAIN" or "human review" in str(e)
-            if needs_human:
-                try:
-                    st.review_task_id = self.reviewer.packet(c, patient_ref, str(e), risk, None)
-                except GatewayError as ge:
-                    return self._stop(st, ge.code)
-                st.status = Status.ESCALATED
+    # ---- engine ---------------------------------------------------------------
+    async def _drive(
+        self, st: WorkflowState, ident: CallIdentity, scratch: Scratch, stage: str, expected_version: int | None
+    ) -> None:
+        rt = self.rt
+        while stage != "close":
+            st.stage = stage
+            if stage not in st.stages_visited:
+                st.stages_visited.append(stage)
+            outcome = await self._run_stage(st, ident, scratch, stage)
+            if isinstance(outcome, Continue):
+                stage = NEXT[stage]
+            elif isinstance(outcome, Wait):
+                st.status = Status.AWAITING_APPROVAL
+                rt.tracer.event(
+                    trace_id=st.trace_id, node="approval_requested", actor=self.name, status="PENDING",
+                    approval_id=st.review_task_id, stages_visited=list(st.stages_visited),
+                )  # fmt: skip
+                rt.store.put(st, expected_version)
+                return
             else:
-                st.status = Status.COMPLETED
-            self._ev(st, "stage:plan", skill="design-safe-intervention", output={"no_intervention": str(e)})
-            return self._finish(st)
-        except GatewayError as e:
-            return self._stop(st, e.code)
-        st.intervention_plan = plan
-        self._ev(st, "stage:plan", skill="design-safe-intervention", output={"template": plan.template_id},
-                 evidence_ids=plan.evidence_refs)
+                self._finalize(st, outcome)
+                break
+        await self._close(st, expected_version)
 
-        # -- safety check (fail closed) --
-        st.stage = "safety_check"
-        results = self.safety.run(plan)
-        st.guardrail_results += results
-        blocked = [g for g in results if g.decision == "BLOCK"]
-        self._ev(st, "stage:safety_check", status="BLOCK" if blocked else "OK", guardrail_decision="BLOCK" if blocked else "PASS")
-        if blocked:
-            return self._stop(st, "CONTENT_BLOCKED", rationale="Planned message failed content-safety checks and was not sent.")
-
-        # -- approval gate --
-        st.stage = "approval"
-        if plan.requires_approval or plan.routes_to_human:
+    async def _run_stage(self, st: WorkflowState, ident: CallIdentity, scratch: Scratch, stage: str) -> Outcome:
+        rt = self.rt
+        async with rt.tracer.span(
+            trace_id=st.trace_id, node=f"stage:{stage}", actor=self.name, agent=self.name, agent_version=AGENT_VERSION
+        ) as sp:
             try:
-                st.review_task_id = self.reviewer.packet(c, patient_ref, "approval required: " + ",".join(plan.approval_reasons), risk, plan)
+                outcome = await HANDLERS[stage].run(rt, st, ident, scratch, sp)
+            except WorkflowStop as e:
+                outcome = Stop(e.reason, e.status, e.rationale)
             except GatewayError as e:
-                return self._stop(st, e.code)
-            st.status = Status.AWAITING_APPROVAL
-            self._ev(st, "approval_requested", status="PENDING", approval_id=st.review_task_id)
-            return self.store.put(st)
-        # Pre-approved template with a recorded standing clinician approval.
-        st.approval = self.reviewer.record("clinician.standing-approval", "clinician", "APPROVE",
-                                           f"Standing approval for {plan.template_id}@{plan.template_version}")
-        self.gw.valid_approvals.add(st.approval.approval_id)
-        self._ev(st, "approval", approval_id=st.approval.approval_id, output={"standing": True})
-        return self._execute(st, c)
+                outcome = Stop(e.code)
+            if isinstance(outcome, Stop):
+                sp.status = (
+                    "DENIED"
+                    if outcome.reason in DENIED_STOP_REASONS
+                    or outcome.reason.startswith("CONSENT_")
+                    and outcome.reason != "CONSENT_REVIEW"
+                    else "STOPPED"
+                )
+                sp.set(error_code=outcome.reason)
+            elif isinstance(outcome, Wait):
+                sp.status = "PENDING"
+            return outcome
+
+    def _finalize(self, st: WorkflowState, outcome: Outcome) -> None:
+        if isinstance(outcome, Stop):
+            st.status, st.stop_reason = outcome.status, outcome.reason
+            st.rationale = outcome.rationale or f"Workflow stopped: {outcome.reason}."
+            self.rt.tracer.event(trace_id=st.trace_id, node="stop", actor=self.name, status="STOPPED", error_code=outcome.reason)
+        elif isinstance(outcome, Finish):
+            st.status, st.rationale = outcome.status, outcome.rationale
+
+    async def _close(self, st: WorkflowState, expected_version: int | None) -> None:
+        rt = self.rt
+        st.stage = "close"
+        if "close" not in st.stages_visited:
+            st.stages_visited.append("close")
+        rt.tracer.event(
+            trace_id=st.trace_id, node="final", actor=self.name, status=st.status.value,
+            output={"status": st.status.value, "stop": st.stop_reason}, stages_visited=list(st.stages_visited),
+            evidence_ids=st.evidence_refs, approval_id=st.approval.approval_id if st.approval else None,
+            action_receipt=st.action_receipt.receipt_id if st.action_receipt else None,
+            error_code=st.stop_reason, guardrail_decision=("BLOCK" if st.stop_reason in ("CONTENT_BLOCKED", "INPUT_BLOCKED") else None),
+        )  # fmt: skip
+        rt.metrics.inc("adherence_workflows_total", status=st.status.value)
+        if st.stop_reason:
+            rt.metrics.inc("adherence_workflow_stops_total", reason=st.stop_reason)
+        rt.store.put(st, expected_version)
+        rt.alerts.evaluate_and_record(st.trace_id)
 
     # ---- human decision -------------------------------------------------------
-    def decide(self, trace_id: str, *, approver: str, role: str, decision: str, rationale: str, conditions: str = "",
-               expected_version: Optional[int] = None) -> WorkflowState:
-        st = self.store.get(trace_id)
-        if not st:
-            raise KeyError("workflow not found or expired")
+    async def decide(
+        self, trace_id: str, *, approver: str, role: str, decision: Literal["APPROVE", "REJECT"], rationale: str, conditions: str = "",
+        expected_version: int | None = None,
+    ) -> WorkflowState:  # fmt: skip
+        rt = self.rt
+        lock = rt.locks.setdefault(trace_id, asyncio.Lock())
+        async with lock:  # one decision at a time per workflow
+            st = rt.store.get(trace_id)
+            if not st:
+                raise KeyError("workflow not found or expired")
+            loaded = st.version
+            ident = CallIdentity(st.requester, st.requester_role, st.purpose, st.trace_id)
+            with rt.tracer.bind(
+                request_id=st.request_id, workflow_version=rt.policy.workflow_version, policy_version=rt.policy.policy_version
+            ):
+                async with rt.tracer.span(
+                    trace_id=trace_id, node="decision", actor=approver, parent_span_id=st.root_span_id, role=role
+                ) as sp:
+                    self._authorize_decision(st, approver, role, rationale, expected_version, sp)
+                    plan = require(st.intervention_plan, "intervention plan")
+                    if plan.expires_at < rt.clock.now():
+                        self._finalize(st, Stop("PLAN_EXPIRED"))
+                        await self._close(st, loaded)
+                        return st
+                    # Re-check consent at execution time (withdrawal may have occurred while waiting).
+                    res = await rt.consent_agent.run(ident, st.patient_ref, plan.channel)
+                    if res.decision != "ALLOW":
+                        self._finalize(
+                            st,
+                            Stop(
+                                f"CONSENT_{res.decision}",
+                                rationale=f"Consent changed while awaiting approval: {res.reason}. No message sent.",
+                            ),
+                        )
+                        await self._close(st, loaded)
+                        return st
+                    st.approval = rt.reviewer.record(approver, role, decision, rationale, conditions)
+                    rt.metrics.inc("adherence_approvals_total", decision=decision, kind="human")
+                    rt.tracer.event(
+                        trace_id=trace_id, node="approval", actor=approver, status=decision,
+                        approval_id=st.approval.approval_id, guardrail_decision="HUMAN_" + decision,
+                        output={"approver_role": role, "decision": decision},
+                    )  # fmt: skip
+                    if decision == "REJECT":
+                        self._finalize(
+                            st, Finish(Status.REJECTED, "A human reviewer rejected the proposed outreach; nothing was sent.")
+                        )
+                        await self._close(st, loaded)
+                        return st
+                    rt.approvals.grant(st.approval.approval_id, plan.idempotency_key)
+                    st.status = Status.RUNNING
+                    await self._drive(st, ident, Scratch(), "execute", expected_version=loaded)
+                    return st
+
+    def _authorize_decision(
+        self, st: WorkflowState, approver: str, role: str, rationale: str, expected: int | None, sp: Any
+    ) -> None:
+        def deny(code: str, msg: str) -> None:
+            sp.status = "DENIED"
+            sp.set(error_code=code)
+            raise PermissionError(msg)
+
         if st.status != Status.AWAITING_APPROVAL:
-            raise PermissionError("workflow is not awaiting approval")
+            deny("NOT_AWAITING_APPROVAL", "workflow is not awaiting approval")
         if role not in APPROVER_ROLES:
-            self._ev(st, "approval", status="DENIED", error_code="APPROVER_ROLE")
-            raise PermissionError("role not permitted to approve")
+            deny("APPROVER_ROLE", "role not permitted to approve")
         if approver == st.requester:
-            self._ev(st, "approval", status="DENIED", error_code="SEGREGATION_OF_DUTIES")
-            raise PermissionError("requester cannot approve own request")
+            deny("SEGREGATION_OF_DUTIES", "requester cannot approve own request")
         if not rationale.strip():
             raise ValueError("rationale required")
-        if expected_version is not None and st.version != expected_version:
-            raise PermissionError("stale version")
-        if st.intervention_plan.expires_at < datetime.now(timezone.utc):
-            return self._stop(st, "PLAN_EXPIRED")
-        # Re-check consent at execution time (withdrawal may have occurred while waiting).
-        c = self._ctx(st)
-        d, _, reason, _ = self.consent_agent.run(c, st.patient_ref, st.intervention_plan.channel)
-        if d != "ALLOW":
-            return self._stop(st, f"CONSENT_{d}", rationale=f"Consent changed while awaiting approval: {reason}. No message sent.")
-        st.approval = self.reviewer.record(approver, role, decision, rationale, conditions)
-        self._ev(st, "approval", status=decision, approval_id=st.approval.approval_id,
-                 output={"approver_role": role, "decision": decision}, guardrail_decision="HUMAN_" + decision)
-        if decision == "REJECT":
-            st.status, st.rationale = Status.REJECTED, "A human reviewer rejected the proposed outreach; nothing was sent."
-            return self._finish(st)
-        self.gw.valid_approvals.add(st.approval.approval_id)
-        return self._execute(st, c)
+        if expected is not None and st.version != expected:
+            raise ConflictError("workflow modified concurrently")
 
-    # ---- execute / verify / close ---------------------------------------------
-    def _execute(self, st: WorkflowState, c: Ctx):
-        st.stage = "execute"
-        plan = st.intervention_plan
-        try:
-            st.action_receipt = self.delivery.run(c, st.patient_ref, plan, st.approval.approval_id)
-        except GatewayError as e:
-            # Non-idempotent write: never blindly retried; raise an operational alert.
-            self.audit.append(trace_id=st.trace_id, actor=self.name, node="alert", status="ALERT", error_code=e.code,
-                              tool="notification-send")
-            return self._stop(st, e.code, rationale="Delivery failed; not retried automatically. Operations alerted.")
-        st.stage = "verify"
-        self._ev(st, "stage:execute", output={"receipt": st.action_receipt.receipt_id}, action_receipt=st.action_receipt.receipt_id)
-        self.memory.remember_outcome(st.patient_ref, plan.template_id, st.action_receipt.delivery_status)
-        st.status = Status.COMPLETED
-        st.rationale = ("Approved outreach was handed to the notification service (simulated in this prototype). "
-                        "A delivery receipt does not show that the message was read or that medicine was taken.")
-        return self._finish(st)
+    # ---- patient rights ---------------------------------------------------------
+    def _rights_event(self, patient_ref: str, actor: str, node: str, **fields: Any) -> None:
+        self.rt.tracer.event(trace_id="rights-" + patient_ref, node=node, actor=actor, agent=self.name, **fields)
 
-    # ---- patient rights -------------------------------------------------------
-    def withdraw_consent(self, patient_ref: str, actor: str):
-        self.backend.withdraw_consent(patient_ref)
-        self.audit.append(trace_id="rights-" + patient_ref, actor=actor, node="consent_withdrawn", agent=self.name)
+    def withdraw_consent(self, patient_ref: str, actor: str) -> None:
+        self.rt.backend.withdraw_consent(patient_ref)
+        self._rights_event(patient_ref, actor, "consent_withdrawn")
 
-    def delete_patient(self, patient_ref: str, actor: str) -> dict:
-        r = self.memory.delete_patient(patient_ref)
-        r["workflows_purged"] = self.store.purge_patient(patient_ref)
-        self.audit.append(trace_id="rights-" + patient_ref, actor=actor, node="deletion_request", agent=self.name,
-                          output=r)   # audit trail itself is retained (immutable, pseudonymous)
-        return r
+    def delete_patient(self, patient_ref: str, actor: str) -> dict[str, Any]:
+        rt = self.rt
+        result = rt.memory.delete_patient(patient_ref)
+        if result["blocked"] is None:
+            result["workflows_purged"] = rt.store.purge_patient(patient_ref)
+            tasks = [k for k, v in rt.backend.tasks.items() if v["patient_ref"] == patient_ref]
+            for k in tasks:
+                del rt.backend.tasks[k]
+            result["review_tasks_purged"] = len(tasks)
+        self._rights_event(
+            patient_ref, actor, "deletion_request", output=result
+        )  # audit trail itself is retained (immutable, pseudonymous)
+        return result
 
-    def explain(self, trace_id: str) -> dict:
+    def correct_outcome(self, patient_ref: str, idx: int, delivery_status: str, actor: str) -> None:
+        self.rt.memory.correct(patient_ref, idx, delivery_status)
+        self._rights_event(patient_ref, actor, "correction_request", output={"idx": idx, "status": delivery_status})
+
+    def access_export(self, patient_ref: str, actor: str) -> dict[str, Any]:
+        rt = self.rt
+        self._rights_event(patient_ref, actor, "access_request")
+        return {
+            "patient_ref": patient_ref,
+            "intervention_history": [
+                {"template_id": r["template_id"], "delivery_status": r["delivery_status"], "at": r["at"].isoformat()}
+                for r in rt.memory.raw(patient_ref)
+            ],
+            "consent": (c.model_dump(mode="json") if (c := rt.backend.get_consent(patient_ref)) else None),
+        }
+
+    def apply_retention(self, actor: str) -> int:
+        n = self.rt.memory.apply_retention()
+        self._rights_event("all", actor, "retention_applied", output={"removed": n})
+        return n
+
+    def explain(self, trace_id: str) -> dict[str, Any]:
         """Patient-readable explanation for access requests."""
-        st = self.store.get(trace_id)
+        st = self.rt.store.get(trace_id)
         if not st:
             raise KeyError(trace_id)
         r = st.risk_assessment
-        return {"trace_id": trace_id, "what_happened": st.rationale or st.status.value, "status": st.status.value,
-                "why": [f.detail for f in r.factors] if r else [],
-                "limits": r.limitations if r else [],
-                "human_review": bool(st.approval) or st.status in (Status.AWAITING_APPROVAL, Status.ESCALATED),
-                "message_sent": bool(st.action_receipt)}
+        return {
+            "trace_id": trace_id,
+            "what_happened": st.rationale or st.status.value,
+            "status": st.status.value,
+            "why": [f.detail for f in r.factors] if r else [],
+            "limits": r.limitations if r else [],
+            "human_review": bool(st.approval) or st.status in (Status.AWAITING_APPROVAL, Status.ESCALATED),
+            "message_sent": bool(st.action_receipt),
+        }

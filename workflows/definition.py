@@ -1,26 +1,74 @@
-"""Explicit state machine: intake -> authorize -> retrieve -> assess -> plan -> safety_check -> approval -> execute -> verify -> close."""
+"""Explicit state machine: intake -> authorize -> retrieve -> assess -> plan -> safety_check -> approval -> execute -> verify -> close.
+
+Stage handlers return an Outcome; the engine (agents/supervisor.py) owns transitions, persistence and audit.
+"""
+
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Protocol
+
+from domain.errors import WorkflowStop
+from domain.models import PatientContext, Status, WorkflowState
+
+if TYPE_CHECKING:
+    from mcp.gateway import CallIdentity
+    from observability.tracing import Span
+    from workflows.runtime import Runtime
+
 STAGES = ["intake", "authorize", "retrieve", "assess", "plan", "safety_check", "approval", "execute", "verify", "close"]
+NEXT = dict(zip(STAGES, STAGES[1:], strict=False))
 APPROVER_ROLES = {"pharmacist", "nurse", "clinician"}
 REQUESTER_ROLES = {"care_coordinator"}
-REQUIRED_TRACE_NODES = ["request", "agent_plan", "stage:authorize", "stage:retrieve", "stage:assess", "final"]
-POLICY_VERSION = "POLICY-1.0"
-WORKFLOW_VERSION = "wf-1.0"
-STALE_DAYS = 30
+DENIED_STOP_REASONS = {"ROLE_NOT_AUTHORIZED", "IDENTITY_MISMATCH"}
 
 
-def next_stage(stage: str) -> str:
-    return STAGES[STAGES.index(stage) + 1]
+@dataclass
+class Continue:
+    """Proceed to the next stage."""
 
 
-def required_nodes(st) -> list[str]:
-    """Trace nodes that must exist for a workflow in its current state."""
-    base = ["request", "agent_plan"]
-    if st.status.value == "STOPPED" or st.status.value == "ESCALATED" and st.risk_assessment is None:
-        base += ["stop"]
-    else:
-        base += ["stage:authorize", "stage:retrieve", "stage:assess"]
-    if st.status.value == "AWAITING_APPROVAL":
-        return base + ["approval_requested"]
-    if st.approval:
-        base.append("approval")
-    return base + ["final"]
+@dataclass
+class Stop:
+    """Fail closed: stop with a reason (missing consent, stale data, tool failure, safety block, ...)."""
+
+    reason: str
+    status: Status = Status.STOPPED
+    rationale: str = ""
+
+
+@dataclass
+class Wait:
+    """Pause until a human decision (persisted; resumed by Supervisor.decide)."""
+
+
+@dataclass
+class Finish:
+    """Normal early completion (e.g. no intervention needed) or handoff to a human."""
+
+    status: Status
+    rationale: str = ""
+
+
+Outcome = Continue | Stop | Wait | Finish
+
+
+@dataclass
+class Scratch:
+    """Per-run transient inputs. Raw patient text lives here only and is never persisted or logged."""
+
+    identity_patient_ref: str = ""
+    patient_message: str = ""
+    context: PatientContext | None = None
+    extras: dict[str, object] = field(default_factory=dict)
+
+
+def require[T](value: T | None, what: str) -> T:
+    """Fail closed if workflow state needed by a stage is missing (asserts are stripped under python -O)."""
+    if value is None:
+        raise WorkflowStop("INVALID_STATE", f"Internal workflow state missing: {what}. No action taken.")
+    return value
+
+
+class StageHandler(Protocol):
+    name: str
+
+    async def run(self, rt: "Runtime", st: WorkflowState, ident: "CallIdentity", scratch: Scratch, sp: "Span") -> Outcome: ...

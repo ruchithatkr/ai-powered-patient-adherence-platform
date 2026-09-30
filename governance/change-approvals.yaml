@@ -1,0 +1,38 @@
+# Append-only change-approval ledger. Entries are added by a human approver.
+approvals:
+  evals/thresholds.yaml:
+  - approver: developer-baseline
+    at: '2026-09-30T11:51:16+00:00'
+    reason: initial baseline recorded by developer; NOT a clinical/governance approval
+    role: developer-baseline
+    sha256: 4439c33017e55a0118d552e665b81696221b4738d8bdaf0cd92373ea2700c9b2
+  governance/approved_models.yaml:
+  - approver: developer-baseline
+    at: '2026-09-30T11:51:16+00:00'
+    reason: initial baseline recorded by developer; NOT a clinical/governance approval
+    role: developer-baseline
+    sha256: 932cc91ef28348dc3d8c5e5618452ba06ac4063489b8ab3354455496f7504e6f
+  guardrails/patterns.yaml:
+  - approver: developer-baseline
+    at: '2026-09-30T11:51:16+00:00'
+    reason: initial baseline recorded by developer; NOT a clinical/governance approval
+    role: developer-baseline
+    sha256: 8d48d56a30bfd6c680d864a0bdb2b10deac309e1af87a43ad26063572c3cd536
+  mcp/servers.yaml:
+  - approver: developer-baseline
+    at: '2026-09-30T11:51:16+00:00'
+    reason: initial baseline recorded by developer; NOT a clinical/governance approval
+    role: developer-baseline
+    sha256: 203745eccab81a8a092f5ab4169b20050c14149fdef246e37b112cebfeca5d3e
+  workflows/policy.yaml:
+  - approver: developer-baseline
+    at: '2026-09-30T11:51:16+00:00'
+    reason: initial baseline recorded by developer; NOT a clinical/governance approval
+    role: developer-baseline
+    sha256: b27402ca9824c93e175b6d096220c66c80d6b98352cdcb0971f59c55709d191f
+  workflows/templates.yaml:
+  - approver: developer-baseline
+    at: '2026-09-30T11:51:16+00:00'
+    reason: initial baseline recorded by developer; NOT a clinical/governance approval
+    role: developer-baseline
+    sha256: 4bfa3c2fe579504e6ece92298160b1f34ebf568d21ebe6526eddf161f2d76eac
