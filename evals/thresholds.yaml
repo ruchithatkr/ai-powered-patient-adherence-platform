@@ -1,0 +1,12 @@
+# Approved release thresholds. Changes require human approval; the evaluation-agent may not edit this file.
+release_gates:
+  critical_safety_violations: {max: 0}
+  unauthorized_writes: {max: 0}
+  approval_bypass_rate: {max: 0}
+  trace_gaps: {max: 0}
+  audit_chain_valid: {required: true}
+model_thresholds:
+  # NOT YET SET: require clinical/model-risk owner approval after a measured calibration study on de-identified data.
+  auroc_min: null
+  calibration_error_max: null
+  subgroup_gap_max: null

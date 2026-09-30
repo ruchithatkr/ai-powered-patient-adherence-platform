@@ -1,0 +1,11 @@
+# Approved logical MCP servers (allowlist). Anything not listed is denied.
+# writes: true => requires an explicit human-approval token (except care-team-review/audit-write, which only create review/audit records).
+purposes: [adherence_support, safety_review]
+servers:
+  patient-records-read:  {ops: {get_context: {write: false, required: [patient_ref]}}, roles: [care_coordinator, pharmacist, nurse, clinician]}
+  consent-registry-read: {ops: {get_consent: {write: false, required: [patient_ref]}}, roles: [care_coordinator, pharmacist, nurse, clinician, privacy_officer]}
+  knowledge-base-read:   {ops: {get_article: {write: false, required: [kb_id]}}, roles: [care_coordinator, pharmacist, nurse, clinician]}
+  risk-model-infer:      {ops: {infer: {write: false, required: [features]}}, roles: [care_coordinator, pharmacist, nurse, clinician]}
+  care-team-review:      {ops: {create_task: {write: true, approval: false, required: [patient_ref, packet]}, get_task: {write: false, required: [task_id]}}, roles: [care_coordinator, pharmacist, nurse, clinician]}
+  notification-send:     {ops: {send: {write: true, approval: true, required: [idempotency_key, channel, template_id, body, patient_ref]}}, roles: [care_coordinator]}
+  audit-write:           {ops: {append: {write: true, approval: false, required: []}}, roles: [care_coordinator, pharmacist, nurse, clinician, privacy_officer]}
